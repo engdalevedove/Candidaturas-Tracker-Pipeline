@@ -1,11 +1,11 @@
-name: Sync Candidaturas Pipeline
+﻿name: Sync Candidaturas Pipeline
 
 on:
   schedule:
     # Roda todos os dias às 08:30 e 18:30 (horário de Brasília = 11:30 e 21:30 UTC)
     - cron: "30 11 * * *"
     - cron: "30 21 * * *"
-  workflow_dispatch: # Permite rodar manualmente com 1 clique na aba Actions do GitHub
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -37,12 +37,14 @@ jobs:
       - name: Executar pipeline de coleta e consolidação
         env:
           CI: "true"
-          GUPY_TOKEN: ${{ secrets.GUPY_TOKEN }}
-          SOLIDES_TOKEN: ${{ secrets.SOLIDES_TOKEN }}
+          GUPY_COOKIE: ${{ secrets.GUPY_COOKIE }}
+          SOLIDES_BEARER_TOKEN: ${{ secrets.SOLIDES_BEARER_TOKEN }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-          HOTMAIL_USER: ${{ secrets.HOTMAIL_USER }}
-          HOTMAIL_PASSWORD: ${{ secrets.HOTMAIL_PASSWORD }}
+          HOTMAIL_1_EMAIL: ${{ secrets.HOTMAIL_1_EMAIL }}
+          HOTMAIL_1_PASS: ${{ secrets.HOTMAIL_1_PASS }}
+          HOTMAIL_2_EMAIL: ${{ secrets.HOTMAIL_2_EMAIL }}
+          HOTMAIL_2_PASS: ${{ secrets.HOTMAIL_2_PASS }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
