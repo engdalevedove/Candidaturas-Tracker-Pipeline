@@ -58,7 +58,8 @@ jobs:
             git add -f exports/candidaturas_bi.csv
             if ! git diff --staged --quiet; then
               git commit -m "chore(data): atualiza base analitica candidaturas_bi.csv [skip ci]"
-              git push
+              git pull --rebase origin main
+              git push origin main
             else
               echo "Nenhuma novidade para commitar."
             fi
