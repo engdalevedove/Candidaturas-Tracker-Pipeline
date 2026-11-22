@@ -1,0 +1,9 @@
+﻿.venv/
+__pycache__/
+*.pyc
+.env
+auth_state.json
+chrome_profile_real/
+data/
+exports/
+.streamlit/secrets.toml
