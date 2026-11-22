@@ -2,43 +2,62 @@ name: Sync Candidaturas Pipeline
 
 on:
   schedule:
-    - cron: '0 12,21 * * *' # 09:00 e 18:00 BRT
-  workflow_dispatch:
+    # Roda todos os dias às 08:30 e 18:30 (horário de Brasília = 11:30 e 21:30 UTC)
+    - cron: "30 11 * * *"
+    - cron: "30 21 * * *"
+  workflow_dispatch: # Permite rodar manualmente com 1 clique na aba Actions do GitHub
 
 permissions:
   contents: write
 
 jobs:
-  sync:
+  run-pipeline:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.11
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.11"
+          cache: "pip"
 
       - name: Instalar dependências
         run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
-          playwright install chromium
+          playwright install chromium --with-deps
 
-      - name: Executar pipeline
+      - name: Garantir diretórios de dados e exportação
+        run: |
+          mkdir -p data exports
+
+      - name: Executar pipeline de coleta e consolidação
         env:
           CI: "true"
-          TWOCAPTCHA_API_KEY: ${{ secrets.TWOCAPTCHA_API_KEY }}
+          GUPY_TOKEN: ${{ secrets.GUPY_TOKEN }}
+          SOLIDES_TOKEN: ${{ secrets.SOLIDES_TOKEN }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          HOTMAIL_USER: ${{ secrets.HOTMAIL_USER }}
+          HOTMAIL_PASSWORD: ${{ secrets.HOTMAIL_PASSWORD }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          HOTMAIL_1_EMAIL: ${{ secrets.HOTMAIL_1_EMAIL }}
-          HOTMAIL_1_PASS: ${{ secrets.HOTMAIL_1_PASS }}
-          HOTMAIL_2_EMAIL: ${{ secrets.HOTMAIL_2_EMAIL }}
-          HOTMAIL_2_PASS: ${{ secrets.HOTMAIL_2_PASS }}
-        run: python main.py
-
-      - name: Commit banco SQLite e CSV do BI
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/applications.db exports/candidaturas_bi.csv
-          git commit -m "chore: atualiza status de candidaturas [skip ci]" || exit 0
-          git push
+          python main.py
+
+      - name: Publicar CSV analítico atualizado (se houver alteração)
+        run: |
+          if [ -f "exports/candidaturas_bi.csv" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -f exports/candidaturas_bi.csv
+            if ! git diff --staged --quiet; then
+              git commit -m "chore(data): atualiza base analitica candidaturas_bi.csv [skip ci]"
+              git push
+            else
+              echo "Nenhuma novidade para commitar."
+            fi
+          fi
