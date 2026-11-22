@@ -1,10 +1,11 @@
-import os
+﻿import os
 import sqlite3
 from pathlib import Path
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
 from src.database import init_db, upsert_candidatura, exportar_para_bi
+from src.notifier import enviar_alerta_telegram
 from src.collectors.gupy_collector import extrair_gupy
 from src.collectors.solides_collector import extrair_solides
 from src.collectors.indeed_collector import extrair_indeed
@@ -13,7 +14,6 @@ from src.collectors.workday_collector import extrair_workday
 from src.collectors.cornerstone_collector import extrair_cornerstone
 from src.collectors.linkedin_collector import extrair_linkedin
 from src.collectors.email_collector import extrair_emails
-from src.collectors.hotmail_collector import extrair_hotmail
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(dotenv_path=BASE_DIR / ".env", override=True)
@@ -27,45 +27,6 @@ def _coletar_com_seguranca(nome_fonte: str, funcao_coleta, *args, **kwargs) -> l
     except Exception as exc:
         print(f"[{nome_fonte}] Falha/bloqueio ignorado para não travar o pipeline: {exc}")
         return []
-
-
-def _notificar_telegram(novos_itens: list[dict], atualizados_itens: list[dict]) -> None:
-    if not novos_itens and not atualizados_itens:
-        print("[Telegram] Nenhuma novidade para notificar.")
-        return
-
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-    if not token or not chat_id:
-        print("[Telegram] Credenciais ausentes; pulando notificação.")
-        return
-
-    try:
-        import src.notifier as notifier_mod
-        for nome_func in ("notificar_novidades", "enviar_notificacao", "notificar_telegram", "enviar_telegram"):
-            fn = getattr(notifier_mod, nome_func, None)
-            if callable(fn):
-                fn(novos_itens, atualizados_itens)
-                return
-
-        import requests
-        linhas = ["📊 *Atualização de Candidaturas*"]
-        if novos_itens:
-            linhas.append(f"🆕 *Novas ({len(novos_itens)}):*")
-            for item in novos_itens[:10]:
-                linhas.append(f"• {item.get('empresa')} — {item.get('cargo')} ({item.get('plataforma')})")
-        if atualizados_itens:
-            linhas.append(f"🔄 *Atualizadas ({len(atualizados_itens)}):*")
-            for item in atualizados_itens[:10]:
-                linhas.append(f"• {item.get('empresa')} — {item.get('cargo')}: {item.get('status')}")
-
-        requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": "\n".join(linhas), "parse_mode": "Markdown"},
-            timeout=15,
-        )
-    except Exception as exc:
-        print(f"[Telegram] Falha ao enviar notificação (ignorada): {exc}")
 
 
 def _contar_total_banco(db_path: Path) -> int:
@@ -99,14 +60,13 @@ def main() -> None:
             coletados.extend(_coletar_com_seguranca("Workday", extrair_workday, context))
             coletados.extend(_coletar_com_seguranca("Cornerstone", extrair_cornerstone, context))
             coletados.extend(_coletar_com_seguranca("LinkedIn", extrair_linkedin, context))
-            # coletados.extend(_coletar_com_seguranca("E-mail (Gmail)", extrair_emails))
-            # coletados.extend(_coletar_com_seguranca("E-mail (Hotmail)", extrair_hotmail))
             context.close()
             browser.close()
     else:
         print("[Playwright] 'auth_state.json' não encontrado — pulando portais com sessão salva.")
-        coletados.extend(_coletar_com_seguranca("E-mail (Gmail)", extrair_emails))
-        coletados.extend(_coletar_com_seguranca("E-mail (Hotmail)", extrair_hotmail))
+
+    # 3. Coletores de e-mail (rodam sempre, com ou sem Playwright)
+    coletados.extend(_coletar_com_seguranca("E-mail (Gmail)", extrair_emails))
 
     novos = 0
     atualizados = 0
@@ -126,11 +86,10 @@ def main() -> None:
             if payload:
                 atualizados_itens.append(payload)
 
-    _notificar_telegram(novos_itens, atualizados_itens)
-
     exportar_para_bi(str(csv_path))
-    total_banco = _contar_total_banco(db_path)
+    enviar_alerta_telegram(novos_itens, atualizados_itens, db_path=str(db_path))
 
+    total_banco = _contar_total_banco(db_path)
     print(
         f"Pipeline finalizado | Total no banco: {total_banco} | "
         f"Novos: {novos} | Atualizados: {atualizados}"
@@ -139,3 +98,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
