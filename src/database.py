@@ -6,6 +6,7 @@ from datetime import datetime
 import pandas as pd
 
 DB_PATH = os.path.join("data", "applications.db")
+STATUS_TERMINAIS = {"Não Avançou", "Contratado / Aprovado", "Vaga Cancelada"}
 
 
 def get_connection():
@@ -70,6 +71,10 @@ def upsert_candidatura(item: dict) -> tuple[str, dict | None]:
     """
     Retorna ('NOVO', item), ('ATUALIZADO', item) ou ('IGUAL', None)
     """
+    empresa_limpa = (item.get("empresa") or "").strip().lower()
+    if empresa_limpa in ("", "linkedin", "candidate-se via indeed", "indeed", "e-mail"):
+        return "IGUAL", None
+
     hash_id = gerar_hash(item["empresa"], item["cargo"], item["plataforma"])
     agora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     status_novo = item.get("status", "Em Andamento")
@@ -86,7 +91,7 @@ def upsert_candidatura(item: dict) -> tuple[str, dict | None]:
             match = _buscar_match_cruzado(conn, item["empresa"], item["plataforma"])
             if match:
                 m_hash, m_empresa, m_cargo, m_plat, m_status, m_obs = match
-                if status_novo != m_status:
+                if status_novo != m_status and m_status not in STATUS_TERMINAIS:
                     data_retorno = item.get("data_retorno") or datetime.today().strftime("%Y-%m-%d")
                     obs_atualizada = f"{m_obs} | Atualizado via E-mail ({data_retorno})" if m_obs else item.get("obs", "")
                     conn.execute("""
@@ -125,6 +130,10 @@ def upsert_candidatura(item: dict) -> tuple[str, dict | None]:
             return "NOVO", item
 
         status_antigo, _ = row
+
+        # Não permite que portal desatualizado reabra candidatura já encerrada
+        if status_antigo in STATUS_TERMINAIS and status_novo in ("Em Andamento", "Avançou de Etapa"):
+            return "IGUAL", None
 
         if status_novo != status_antigo:
             data_retorno = item.get("data_retorno") or datetime.today().strftime("%Y-%m-%d")
