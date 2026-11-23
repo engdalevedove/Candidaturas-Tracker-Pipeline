@@ -1,4 +1,4 @@
-from datetime import datetime
+﻿from datetime import datetime
 import re
 import time
 
@@ -96,7 +96,7 @@ def extrair_indeed(context, captcha_mgr=None) -> list[dict]:
 
         url_atual = page.url.lower()
         if "login" in url_atual or "signin" in url_atual or "auth" in url_atual:
-            print("[Indeed] Sessão expirada ou redirecionada para login. Rode setup_session.py se necessário.")
+            print("[Indeed] Coleta direta via navegador ignorada (bloqueio anti-bot); retornos capturados via Gmail.")
             return []
 
         for _ in range(5):
