@@ -1,5 +1,7 @@
-import re
+﻿import re
 import sqlite3
+import subprocess
+import sys
 import time
 import unicodedata
 from datetime import date
@@ -24,6 +26,9 @@ OPCOES_STATUS = [
     "Contratado / Aprovado",
     "Vaga Cancelada",
 ]
+
+STATUS_ATIVOS_CHAVE = {"em andamento", "avancou de etapa"}
+STATUS_AVANCO_CHAVE = {"avancou de etapa", "contratado / aprovado"}
 
 
 def _normalizar_texto_corrompido(valor: str) -> str:
@@ -178,26 +183,45 @@ def carregar_dados(csv_file: Path, mtime: float) -> pd.DataFrame:
 
     df["status_chave"] = df["status"].apply(_chave_comparacao)
     df["teve_retorno"] = df["dt_retorno"].notna() | (df["status_chave"] != "em andamento")
+    df["eh_ativa"] = df["status_chave"].isin(STATUS_ATIVOS_CHAVE)
+    df["eh_avanco"] = df["status_chave"].isin(STATUS_AVANCO_CHAVE)
 
-    df["status_exibicao"] = df.apply(
-        lambda r: r["status"]
-        if r["status_chave"] != "em andamento"
-        else ("Com Retorno (Aguardando Atualização)" if r["teve_retorno"] else "Em Andamento"),
-        axis=1,
-    )
+    hoje_ts = pd.Timestamp.today().normalize()
+    df["dias_retorno"] = (df["dt_retorno"] - df["dt_inscricao"]).dt.days
+    df.loc[df["dt_inscricao"].isna() | df["dt_retorno"].isna(), "dias_retorno"] = pd.NA
+
+    df["dias_em_aberto"] = (hoje_ts - df["dt_inscricao"]).dt.days
+    df.loc[~df["eh_ativa"] | df["dt_inscricao"].isna(), "dias_em_aberto"] = pd.NA
+
     return df
 
 
 def main() -> None:
-    st.title("📊 Job Hunt BI — Painel de Candidaturas")
-    st.caption(f"Fonte consolidada: `{CSV_PATH.relative_to(BASE_DIR)}`")
+    st.title("📊 Monitoramento Executivo de Candidaturas — Pipeline Automatizado")
+    st.caption(f"Fonte consolidada: `{CSV_PATH.relative_to(BASE_DIR)}` | Regras DAX espelhadas em Python")
 
-    # Barra lateral — Controles de atualização e filtros
     st.sidebar.header("Atualização & Filtros")
 
     if st.sidebar.button("🔄 Atualizar dados agora", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
+
+    if st.sidebar.button("⚡ Rodar pipeline (main.py)", use_container_width=True):
+        with st.spinner("Executando pipeline de coleta e exportação..."):
+            proc = subprocess.run(
+                [sys.executable, str(BASE_DIR / "main.py")],
+                cwd=str(BASE_DIR),
+                capture_output=True,
+                text=True,
+            )
+        if proc.returncode == 0:
+            st.sidebar.success("Pipeline concluído!")
+            st.cache_data.clear()
+            st.rerun()
+        else:
+            st.sidebar.error("Falha ao executar main.py")
+            if proc.stderr:
+                st.sidebar.code(proc.stderr[-600:])
 
     auto_refresh = st.sidebar.checkbox("Auto-atualizar enquanto aberto", value=False)
     intervalo_seg = st.sidebar.slider("Intervalo (segundos)", min_value=5, max_value=60, value=15, step=5)
@@ -207,6 +231,19 @@ def main() -> None:
     if df.empty:
         st.warning("Arquivo `exports/candidaturas_bi.csv` não encontrado ou vazio. Execute `python main.py` primeiro.")
         return
+
+    datas_validas = df["dt_inscricao"].dropna()
+    if not datas_validas.empty:
+        min_d = datas_validas.min().date()
+        max_d = max(datas_validas.max().date(), date.today())
+        periodo = st.sidebar.date_input(
+            "Período de Inscrição (dCalendario)",
+            value=(min_d, max_d),
+            min_value=min_d,
+            max_value=max_d,
+        )
+    else:
+        periodo = None
 
     plataformas_sel = st.sidebar.multiselect(
         "Plataforma",
@@ -224,9 +261,9 @@ def main() -> None:
         default=sorted(df["modalidade"].unique()),
     )
     status_sel = st.sidebar.multiselect(
-        "Status de Acompanhamento",
-        options=sorted(df["status_exibicao"].unique()),
-        default=sorted(df["status_exibicao"].unique()),
+        "Status",
+        options=sorted(df["status"].unique()),
+        default=sorted(df["status"].unique()),
     )
     somente_retorno = st.sidebar.checkbox("Apenas com retorno registrado", value=False)
     busca = st.sidebar.text_input("Buscar empresa ou cargo", placeholder="Ex.: Lanlink, Accenture, Dados...").strip()
@@ -235,8 +272,15 @@ def main() -> None:
         df["plataforma"].isin(plataformas_sel)
         & df["area"].isin(areas_sel)
         & df["modalidade"].isin(modalidades_sel)
-        & df["status_exibicao"].isin(status_sel)
+        & df["status"].isin(status_sel)
     ].copy()
+
+    if isinstance(periodo, tuple) and len(periodo) == 2:
+        d_ini, d_fim = periodo
+        filtrado = filtrado[
+            filtrado["dt_inscricao"].isna()
+            | ((filtrado["dt_inscricao"].dt.date >= d_ini) & (filtrado["dt_inscricao"].dt.date <= d_fim))
+        ]
 
     if somente_retorno:
         filtrado = filtrado[filtrado["teve_retorno"]]
@@ -252,22 +296,26 @@ def main() -> None:
         )
         filtrado = filtrado[mascara]
 
-    # KPIs principais (contagem exata por status)
     total = len(filtrado)
-    em_andamento_puro = int((~filtrado["teve_retorno"]).sum())
+    em_andamento = int(filtrado["eh_ativa"].sum())
+    avancou = int(filtrado["eh_avanco"].sum())
     com_retorno = int(filtrado["teve_retorno"].sum())
-    avancou = int((filtrado["status_chave"] == "avancou de etapa").sum())
-    nao_avancou = int((filtrado["status_chave"] == "nao avancou").sum())
-    taxa_retorno = (com_retorno / total * 100) if total else 0.0
+    taxa_resposta = (com_retorno / total * 100) if total else 0.0
+    taxa_avanco = (avancou / total * 100) if total else 0.0
+
+    media_retorno = filtrado["dias_retorno"].dropna().mean()
+    tempo_medio_str = f"{media_retorno:.1f} dias" if pd.notna(media_retorno) else "—"
+
+    media_aberto = filtrado["dias_em_aberto"].dropna().mean()
+    dias_aberto_str = f"{media_aberto:.1f} dias" if pd.notna(media_aberto) else "—"
 
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Total de Candidaturas", f"{total}")
-    c2.metric("Com Retorno Registrado", f"{com_retorno}", f"{taxa_retorno:.1f}% do total")
-    c3.metric("Em Andamento (Sem Retorno)", f"{em_andamento_puro}")
-    c4.metric("Avançou de Etapa", f"{avancou}")
-    c5.metric("Não Avançou", f"{nao_avancou}")
+    c1.metric("Total Candidaturas", f"{total}")
+    c2.metric("Em Andamento", f"{em_andamento}")
+    c3.metric("Avançou de Etapa", f"{avancou}", f"{taxa_avanco:.1f}% conversão")
+    c4.metric("Taxa de Resposta (%)", f"{taxa_resposta:.1f}%")
+    c5.metric("Tempo Médio Retorno", tempo_medio_str, f"Ativas: {dias_aberto_str}")
 
-    # Resumo por modalidade (Remota x Presencial x Híbrida x Não Informada)
     qtd_remoto = int((filtrado["modalidade"] == "Remoto").sum())
     qtd_presencial = int((filtrado["modalidade"] == "Presencial").sum())
     qtd_hibrido = int((filtrado["modalidade"] == "Híbrido").sum())
@@ -281,25 +329,43 @@ def main() -> None:
 
     st.divider()
 
-    # Gráficos — Plataforma, Área e Modalidade
-    col_esq, col_meio, col_dir = st.columns(3)
+    col_funil, col_plat, col_area = st.columns(3)
 
-    with col_esq:
-        st.subheader("Por Plataforma")
-        por_plat = filtrado["plataforma"].value_counts().rename_axis("Plataforma").to_frame("Quantidade")
-        st.bar_chart(por_plat)
+    with col_funil:
+        st.subheader("Funil de Conversão")
+        df_funil = pd.DataFrame(
+            {
+                "Etapa": ["Total Candidaturas", "Com Retorno", "Avançou de Etapa"],
+                "Quantidade": [total, com_retorno, avancou],
+            }
+        )
+        st.dataframe(df_funil, use_container_width=True, hide_index=True)
+        st.bar_chart(df_funil.set_index("Etapa"))
 
-    with col_meio:
-        st.subheader("Por Área")
-        por_area = filtrado["area"].value_counts().rename_axis("Área").to_frame("Quantidade")
-        st.bar_chart(por_area)
+    with col_plat:
+        st.subheader("Por Plataforma e Status")
+        if not filtrado.empty:
+            plat_status = (
+                filtrado.groupby(["plataforma", "status"])
+                .size()
+                .unstack(fill_value=0)
+            )
+            st.bar_chart(plat_status)
+        else:
+            st.info("Sem dados para o filtro atual.")
 
-    with col_dir:
-        st.subheader("Por Modalidade")
-        por_mod = filtrado["modalidade"].value_counts().rename_axis("Modalidade").to_frame("Quantidade")
-        st.bar_chart(por_mod)
+    with col_area:
+        st.subheader("Por Área e Modalidade")
+        col_g1, col_g2 = st.columns(2)
+        with col_g1:
+            st.caption("Área")
+            por_area = filtrado["area"].value_counts().rename_axis("Área").to_frame("Qtd")
+            st.bar_chart(por_area)
+        with col_g2:
+            st.caption("Modalidade")
+            por_mod = filtrado["modalidade"].value_counts().rename_axis("Modalidade").to_frame("Qtd")
+            st.bar_chart(por_mod)
 
-    # Evolução por data de inscrição
     st.subheader("Evolução de Inscrições por Data")
     df_datas = filtrado.dropna(subset=["dt_inscricao"]).copy()
     if not df_datas.empty:
@@ -313,7 +379,6 @@ def main() -> None:
     else:
         st.info("Sem datas válidas em `data_inscricao` para o filtro selecionado.")
 
-    # Atualização rápida de status direto no SQLite + exportação CSV
     with st.expander("✏️ Atualizar Status ou Retorno de uma Candidatura no Banco"):
         if not df.empty:
             opcoes_idx = [
@@ -344,7 +409,10 @@ def main() -> None:
                     parsed = pd.to_datetime(reg_sel["data_retorno"], errors="coerce")
                     if pd.notna(parsed):
                         dt_padrao = parsed.date()
-                preencher_retorno = st.checkbox("Registrar / manter data de retorno", value=bool(reg_sel["data_retorno"]) or novo_status != "Em Andamento")
+                preencher_retorno = st.checkbox(
+                    "Registrar / manter data de retorno",
+                    value=bool(reg_sel["data_retorno"]) or novo_status != "Em Andamento",
+                )
                 nova_dt_retorno = st.date_input("Data de Retorno", value=dt_padrao, disabled=not preencher_retorno)
             with col_s3:
                 nova_obs = st.text_input("Observação", value=reg_sel["obs"])
@@ -366,7 +434,6 @@ def main() -> None:
                 else:
                     st.error(msg)
 
-    # Tabela detalhada com identificação explícita de Remota / Presencial
     st.subheader("Detalhamento das Candidaturas (Remotas e Presenciais)")
     colunas_exibir = [
         "data_inscricao",
@@ -375,8 +442,9 @@ def main() -> None:
         "modalidade",
         "area",
         "plataforma",
-        "status_exibicao",
+        "status",
         "data_retorno",
+        "dias_em_aberto",
         "obs",
     ]
     df_tab = filtrado.sort_values(by=["dt_inscricao", "empresa"], ascending=[False, True], na_position="last")[
@@ -389,8 +457,9 @@ def main() -> None:
             "modalidade": "Modalidade",
             "area": "Área",
             "plataforma": "Plataforma",
-            "status_exibicao": "Status",
+            "status": "Status",
             "data_retorno": "Data Retorno",
+            "dias_em_aberto": "Dias em Aberto (Ativas)",
             "obs": "Observações",
         }
     )

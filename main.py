@@ -1,5 +1,8 @@
 ﻿import os
+import socket
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
@@ -36,10 +39,57 @@ def _contar_total_banco(db_path: Path) -> int:
         return int(row[0]) if row else 0
 
 
+def _porta_em_uso(host: str, porta: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.5)
+        return sock.connect_ex((host, porta)) == 0
+
+
+def _iniciar_dashboard_streamlit(dashboard_path: Path, csv_path: Path) -> None:
+    if os.getenv("GITHUB_ACTIONS", "").lower() == "true":
+        return
+
+    if os.getenv("AUTO_LAUNCH_STREAMLIT", "true").lower() != "true":
+        print("[BI] Abertura automática do Streamlit desativada (AUTO_LAUNCH_STREAMLIT=false).")
+        return
+
+    if not dashboard_path.exists():
+        print(f"[BI] '{dashboard_path.name}' não encontrado — pulando abertura do painel.")
+        return
+
+    if not csv_path.exists():
+        print(f"[BI] '{csv_path}' não encontrado — pulando abertura do painel.")
+        return
+
+    porta = int(os.getenv("STREAMLIT_PORT", "8501"))
+    if _porta_em_uso("127.0.0.1", porta):
+        print(f"[BI] Painel Streamlit já ativo em http://localhost:{porta} (dados sincronizados no CSV).")
+        return
+
+    subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "streamlit",
+            "run",
+            str(dashboard_path),
+            "--server.port",
+            str(porta),
+            "--server.headless",
+            "false",
+        ],
+        cwd=str(BASE_DIR),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    print(f"[BI] Painel Streamlit iniciado em http://localhost:{porta}")
+
+
 def main() -> None:
     db_path = BASE_DIR / "data" / "applications.db"
     csv_path = BASE_DIR / "exports" / "candidaturas_bi.csv"
     auth_path = BASE_DIR / "auth_state.json"
+    dashboard_path = BASE_DIR / "dashboard.py"
 
     init_db()
 
@@ -95,8 +145,8 @@ def main() -> None:
         f"Novos: {novos} | Atualizados: {atualizados}"
     )
 
+    _iniciar_dashboard_streamlit(dashboard_path, csv_path)
+
 
 if __name__ == "__main__":
     main()
-
-
