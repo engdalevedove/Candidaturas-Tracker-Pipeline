@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+﻿from datetime import datetime, timedelta
 import email
 from email.header import decode_header
 import imaplib
@@ -47,8 +47,29 @@ def _extrair_corpo_texto(msg) -> str:
     return ""
 
 
-def _eh_irrelevante(assunto: str, corpo: str) -> bool:
-    texto = f"{assunto} {corpo}".lower()
+def _eh_irrelevante(remetente: str, assunto: str, corpo: str) -> bool:
+    rem = remetente.lower()
+    ass = assunto.lower()
+    texto = f"{rem} {ass} {corpo[:600]}".lower()
+
+    remetentes_bloqueados = [
+        "adobe",
+        "workspace-noreply",
+        "google workspace",
+        "ingresso.com",
+        "alert@indeed.com",
+        "jobalert",
+        "newsletter",
+        "marketing",
+        "promo",
+    ]
+    if any(r in rem for r in remetentes_bloqueados):
+        return True
+
+    # No Indeed, só aceita confirmação explícita de candidatura ("Inscrição via Indeed:" ou "Indeed Application:")
+    if "indeed" in rem and not any(k in ass for k in ["inscrição via indeed", "inscricao via indeed", "indeed application"]):
+        return True
+
     bloqueios = [
         "cartório",
         "cartorio",
@@ -60,38 +81,92 @@ def _eh_irrelevante(assunto: str, corpo: str) -> bool:
         "matricula",
         "nota fiscal",
         "fatura",
+        "black friday",
+        "desconto",
+        "economize",
+        "promoção",
+        "promocao",
+        "oferta",
+        "assinatura",
+        "mais vagas de",
+        "novas vagas",
+        "vagas semelhantes",
+        "alerta de vagas",
     ]
     return any(b in texto for b in bloqueios)
 
 
 def _eh_email_vaga(assunto: str, corpo: str) -> bool:
-    texto = f"{assunto} {corpo}".lower()
+    # Analisa assunto e início do corpo (evita falsos positivos em rodapé)
+    texto = f"{assunto} {corpo[:700]}".lower()
     gatilhos = [
-        "candidatura",
-        "inscrição",
-        "inscricao",
+        "sua candidatura",
+        "candidatura enviada",
+        "candidatura recebida",
+        "inscrição confirmada",
+        "inscricao confirmada",
+        "inscrição via indeed",
+        "inscricao via indeed",
+        "indeed application",
         "processo seletivo",
+        "feedback sobre o processo",
+        "notícia sobre a sua candidatura",
+        "noticia sobre a sua candidatura",
         "entrevista",
         "interview",
-        "testes online",
         "invitation to solve",
         "application received",
-        "indicado",
-        "vaga",
-        "recruiting",
-        "recruiter",
-        "curriculo",
-        "currículo",
+        "application update",
+        "your application",
+        "retorno da vaga",
+        "retorno do processo",
     ]
     return any(g in texto for g in gatilhos)
 
 
 def _normalizar_status_email(assunto: str, corpo: str) -> str:
     texto = f"{assunto} {corpo}".lower()
-    if any(k in texto for k in ["aprovado nos testes", "entrevista", "interview", "invitation to solve", "avançar", "avancar"]):
-        return "Avançou de Etapa"
-    if any(k in texto for k in ["não avançamos", "nao avancamos", "encerrado", "não selecionado", "nao selecionado", "declined"]):
+    negativas = [
+        "não avançamos",
+        "nao avancamos",
+        "não avançar",
+        "nao avancar",
+        "seguir com outros candidatos",
+        "outros candidatos",
+        "encerrado",
+        "não selecionado",
+        "nao selecionado",
+        "não foi aprovado",
+        "nao foi aprovado",
+        "diante dos requisitos",
+        "declined",
+        "not moving forward",
+        "not to move forward",
+        "move forward with other",
+        "other candidates",
+        "unfortunately",
+        "regret to inform",
+        "not selected",
+        "position has been filled",
+    ]
+    if any(k in texto for k in negativas):
         return "Não Avançou"
+
+    positivas = [
+        "aprovado nos testes",
+        "convite para entrevista",
+        "agendar entrevista",
+        "entrevista",
+        "interview",
+        "invitation to solve",
+        "próxima etapa",
+        "proxima etapa",
+        "avançou",
+        "avancou",
+    ]
+    if any(k in texto for k in positivas):
+        return "Avançou de Etapa"
+
     return "Em Andamento"
 
 
@@ -101,7 +176,7 @@ def _classificar_area_email(texto: str) -> str:
         return "Dados / BI"
     if any(k in t for k in ["ia", "inteligência artificial", "inteligencia artificial", "automação", "automacao", "rpa", "python", "banco de dados", "engenheiro(a) de ia"]):
         return "TI / Automação"
-    if any(k in t for k in ["engenharia", "processos", "projeto", "qualidade", "produção", "producao"]):
+    if any(k in t for k in ["engenharia", "processos", "projeto", "qualidade", "produção", "producao", "faixa de domínio"]):
         return "Engenharia / Processos"
     if any(k in t for k in ["financeiro", "controladoria", "contábil", "contabil"]):
         return "Financeiro / Controladoria"
@@ -182,7 +257,7 @@ def extrair_emails(dias_retroativos: int = 30, limite_mensagens: int = 80) -> li
                 assunto = _decodificar_header(msg.get("Subject"))
                 corpo = _extrair_corpo_texto(msg)[:1500]
 
-                if _eh_irrelevante(assunto, corpo) or not _eh_email_vaga(assunto, corpo):
+                if _eh_irrelevante(remetente, assunto, corpo) or not _eh_email_vaga(assunto, corpo):
                     continue
 
                 empresa, cargo = _extrair_empresa_e_cargo(remetente, assunto)

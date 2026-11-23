@@ -1,4 +1,5 @@
-import os
+﻿import os
+import re
 import sqlite3
 import hashlib
 from datetime import datetime
@@ -6,9 +7,11 @@ import pandas as pd
 
 DB_PATH = os.path.join("data", "applications.db")
 
+
 def get_connection():
     os.makedirs("data", exist_ok=True)
     return sqlite3.connect(DB_PATH)
+
 
 def init_db():
     with get_connection() as conn:
@@ -28,9 +31,40 @@ def init_db():
         """)
         conn.commit()
 
+
 def gerar_hash(empresa: str, cargo: str, plataforma: str) -> str:
     chave = f"{empresa.strip().lower()}|{cargo.strip().lower()}|{plataforma.strip().lower()}"
     return hashlib.sha256(chave.encode("utf-8")).hexdigest()
+
+
+def _normalizar_empresa(nome: str) -> str:
+    n = re.sub(r"[^a-z0-9\s]", " ", (nome or "").lower())
+    stopwords = {"ltda", "sa", "s", "a", "inc", "corp", "communications", "brasil", "brazil", "group", "grupo", "rh", "recruiting", "talent"}
+    tokens = [t for t in n.split() if t and t not in stopwords]
+    return " ".join(tokens).strip()
+
+
+def _buscar_match_cruzado(conn: sqlite3.Connection, empresa: str, plataforma: str):
+    """Se vier atualização via E-mail, tenta casar com candidatura ativa em algum portal."""
+    if plataforma.strip().lower() != "e-mail":
+        return None
+    norm_alvo = _normalizar_empresa(empresa)
+    if len(norm_alvo) < 4:
+        return None
+
+    cur = conn.execute("""
+        SELECT hash_id, empresa, cargo, plataforma, status, obs
+        FROM candidaturas
+        WHERE status IN ('Em Andamento', 'Avançou de Etapa')
+          AND LOWER(plataforma) != 'e-mail'
+        ORDER BY data_inscricao DESC
+    """)
+    for row in cur.fetchall():
+        norm_db = _normalizar_empresa(row[1])
+        if norm_db and (norm_alvo in norm_db or norm_db in norm_alvo):
+            return row
+    return None
+
 
 def upsert_candidatura(item: dict) -> tuple[str, dict | None]:
     """
@@ -38,6 +72,7 @@ def upsert_candidatura(item: dict) -> tuple[str, dict | None]:
     """
     hash_id = gerar_hash(item["empresa"], item["cargo"], item["plataforma"])
     agora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    status_novo = item.get("status", "Em Andamento")
 
     with get_connection() as conn:
         cur = conn.execute(
@@ -45,6 +80,29 @@ def upsert_candidatura(item: dict) -> tuple[str, dict | None]:
             (hash_id,)
         )
         row = cur.fetchone()
+
+        # Reconciliação cruzada: retorno definitivo por e-mail atualiza vaga aberta no portal
+        if row is None and status_novo in ("Não Avançou", "Avançou de Etapa", "Contratado / Aprovado", "Vaga Cancelada"):
+            match = _buscar_match_cruzado(conn, item["empresa"], item["plataforma"])
+            if match:
+                m_hash, m_empresa, m_cargo, m_plat, m_status, m_obs = match
+                if status_novo != m_status:
+                    data_retorno = item.get("data_retorno") or datetime.today().strftime("%Y-%m-%d")
+                    obs_atualizada = f"{m_obs} | Atualizado via E-mail ({data_retorno})" if m_obs else item.get("obs", "")
+                    conn.execute("""
+                        UPDATE candidaturas
+                        SET status = ?, data_retorno = ?, obs = ?, updated_at = ?
+                        WHERE hash_id = ?
+                    """, (status_novo, data_retorno, obs_atualizada[:300], agora, m_hash))
+                    conn.commit()
+                    item_atualizado = dict(item)
+                    item_atualizado["empresa"] = m_empresa
+                    item_atualizado["cargo"] = m_cargo
+                    item_atualizado["plataforma"] = m_plat
+                    item_atualizado["status_anterior"] = m_status
+                    item_atualizado["data_retorno"] = data_retorno
+                    return "ATUALIZADO", item_atualizado
+                return "IGUAL", None
 
         if row is None:
             conn.execute("""
@@ -59,7 +117,7 @@ def upsert_candidatura(item: dict) -> tuple[str, dict | None]:
                 item["plataforma"],
                 item.get("data_inscricao", datetime.today().strftime("%Y-%m-%d")),
                 item.get("data_retorno", ""),
-                item.get("status", "Em Andamento"),
+                status_novo,
                 item.get("obs", ""),
                 agora
             ))
@@ -67,7 +125,6 @@ def upsert_candidatura(item: dict) -> tuple[str, dict | None]:
             return "NOVO", item
 
         status_antigo, _ = row
-        status_novo = item.get("status", status_antigo)
 
         if status_novo != status_antigo:
             data_retorno = item.get("data_retorno") or datetime.today().strftime("%Y-%m-%d")
@@ -82,6 +139,7 @@ def upsert_candidatura(item: dict) -> tuple[str, dict | None]:
             return "ATUALIZADO", item
 
         return "IGUAL", None
+
 
 def exportar_para_bi(csv_path: str = "exports/candidaturas_bi.csv"):
     os.makedirs("exports", exist_ok=True)
